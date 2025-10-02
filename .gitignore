@@ -1,0 +1,12 @@
+/backend/bin/
+/backend/pkg/
+/backend/*.db
+
+.env*
+*.swp
+*.swo
+*.tmp
+*.log
+.DS_Store
+.idea/
+.vscode/
