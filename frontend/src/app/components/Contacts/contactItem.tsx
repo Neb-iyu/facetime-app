@@ -1,6 +1,6 @@
 import React, {useState, useEffect} from 'react';
 import { User } from '@/app/types/index';
-import { webSocketClient } from '@/app/api/webSocketClient';
+import { wsClient } from '@/app/api/webSocketClient';
 import  Image from "next/image";
 
 const iconUrl = '';

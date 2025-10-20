@@ -11,12 +11,12 @@ const (
 )
 
 type User struct {
-	Id        int `json:"id" gorm:"primaryKey"`
-	Name      string `json:"name" binding:"required" gorm:"uniqueIndex"`
-	Email     string `json:"email" binding:"required" gorm:"uniqueIndex"`
+	Id        uint 		 `json:"id" gorm:"primaryKey"`
+	Name      string 	 `json:"name" binding:"required" gorm:"uniqueIndex"`
+	Email     string 	 `json:"email" binding:"required" gorm:"uniqueIndex"`
 	Status    UserStatus `json:"status" gorm:"default:'offline'"`
-	AvatarUrl *string `json:"avatar_url"`
-	LastSeen  time.Time `json:"last_seen"`
+	AvatarUrl *string 	 `json:"avatar_url"`
+	LastSeen  time.Time  `json:"last_seen"`
 }
 
 type UserStatusMessage struct {

@@ -44,9 +44,9 @@ func setupRouter(hub *ws.Hub) *gin.Engine {
 			calls.GET("/:id", )
 			calls.POST("", )
 		}
-		apiRoutes.POST("contacts", )
+		apiRoutes.POST("/contacts", )
 
-		apiRoutes.GET("ws", handlers.WebSocketHandler(hub))
+		apiRoutes.GET("/ws", handlers.WebSocketHandler(hub))
 	}
 
 

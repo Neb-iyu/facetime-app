@@ -2,7 +2,7 @@ import { User } from "@/app/types/index";
 import { apiService } from "@/app/api/apiService";
 import React, { useState, useEffect } from "react";
 import ContactItem from "./contactItem";
-import { webSocketClient } from "@/app/api/webSocketClient";
+import { wsClient } from "@/app/api/webSocketClient";
 
 interface Contacts<User> {
     items: User[];

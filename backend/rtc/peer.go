@@ -1,22 +1,22 @@
 package webrtc
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
+	//"encoding/base64"
+	//"encoding/json"
+	//"errors"
+	//"flag"
+	//"fmt"
 	"log"
-	"io"
-	"net/http"
-	"strconv"
+	//"io"
+	//"net/http"
+	//"strconv"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/intervalpli"
 	"github.com/pion/webrtc/v4"
 )
 
-func createPeerConnection() {
+func CreatePeerConnection() *webrtc.PeerConnection {
 	peerConnectionConfig := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -59,5 +59,5 @@ func createPeerConnection() {
 		panic(err)
 	}
 
-	localTrackChan := make(chan *webrtc.TrackLocalStaticRTP)
+	return peerConnection
 }

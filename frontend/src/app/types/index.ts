@@ -1,21 +1,21 @@
 export interface User {
-    id: number;
-    name: string;
-    email: string;
-    status: 'online' | 'offline' | 'busy';
+    id:         number;
+    name:       string;
+    email:      string;
+    status:     'online' | 'offline' | 'busy';
     avatarUrl?: string;
-    lastSeen: Date;
+    lastSeen:   Date;
 }
 
 export interface Call {
-    id: string;
-    callerId: string;
-    calleeId: string;
-    startTime: Date;
-    endTime?: Date;
-    status: 'ringing' | 'ongoing' | 'ended' | 'missed';
-    offer?: RTCSessionDescriptionInit;
-    answer?: RTCSessionDescriptionInit;
+    id:         number;
+    callerId:   number;
+    calleeIds:  number[];
+    startTime:  number;
+    endTime?:   Date;
+    status:     'ringing' | 'ongoing' | 'ended' | 'missed';
+    offer?:     RTCSessionDescriptionInit;
+    answer?:    RTCSessionDescriptionInit;
 }
 
 export type WSMessage = 
@@ -28,13 +28,26 @@ export type WSMessage =
     | {type: 'call_ended', callId: string}
 
 export interface UserStatusMessage {
-    userID: number
-    username: string
-    status: 'online' | 'offline'| 'busy'
-    LastSeen: Date
+    userID:     number
+    username:   string
+    status:     'online' | 'offline'| 'busy'
+    LastSeen:   Date
+}
+export interface CallAcceptedPayload {
+    callId: number
+    userId: number
+    Offer:  string
+}
+export interface CallRejectedPayload {
+    callId: number
+    userId: number
+}
+export interface CallEndedPayload {
+    callId: number
+    userId: number
 }
 export interface WebSocketMessage {
-    type: WSMessage
+    type:    string
     payload: any
-    time: string
+    time:    string
 }
