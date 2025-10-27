@@ -17,7 +17,7 @@ export interface Call {
     offer?:     RTCSessionDescriptionInit;
     answer?:    RTCSessionDescriptionInit;
 }
-
+export type WSMessageType = "user_online" | "user_offline" | "status" | "incoming_call" | "call_accepted" | "call_rejected" | "call_ended" | "call_leave" | "add_callee" | "ice-candidate" | "answer";
 export type WSMessage = 
     | {type: 'offer', callId: string, offer: RTCSessionDescriptionInit}
     | {type: 'answer', callId: string, answer: RTCSessionDescriptionInit}
@@ -36,18 +36,29 @@ export interface UserStatusMessage {
 export interface CallAcceptedPayload {
     callId: number
     userId: number
-    Offer:  string
+    offer:  RTCSessionDescriptionInit
 }
 export interface CallRejectedPayload {
     callId: number
     userId: number
 }
+export interface CallLeavePayload {
+    callId: number
+    userId: number
+}
 export interface CallEndedPayload {
+    callId: number
+}
+export interface ICECandidatePayload {
+    userId: number
+    candidate: RTCIceCandidate
+}
+export interface AddCalleePayload {
     callId: number
     userId: number
 }
 export interface WebSocketMessage {
-    type:    string
+    type:    WSMessageType
     payload: any
     time:    string
 }

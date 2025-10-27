@@ -1,8 +1,8 @@
-import { User } from "@/app/types/index";
-import { apiService } from "@/app/api/apiService";
+import { User } from "@/types/index";
+import { apiService } from "@/api/apiService";
 import React, { useState, useEffect } from "react";
 import ContactItem from "./contactItem";
-import { wsClient } from "@/app/api/webSocketClient";
+import { wsClient } from "@/api/webSocketClient";
 
 interface Contacts<User> {
     items: User[];
@@ -19,7 +19,7 @@ const contactList: React.FC = () => {
         };
         fetchContacts();
         
-        webSocketClient.addPresenceListener((status) => {
+        wsClient.addPresenceListener((status) => {
         setStatuses((prevMap) => new Map(prevMap.set(status.userID, status.status)))
     })
     }, [])

@@ -134,20 +134,7 @@ func AddContact(c *gin.Context) {
 }
 
 //GetUserHistory takes the user's id and returns its call history in JSON format
-func GetUserHistory(c *gin.Context) {
-	callerid, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		log.Printf("Failed to bind id JSON: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	db := database.Db
-	var history []models.Call
-	if result := db.Find(&history, callerid); result.Error != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": result.Error.Error()})
-		log.Printf("Failed to find user %v's history: %v", callerid, result.Error.Error())
-	}
-}
+
 
 //ws functions
 

@@ -1,17 +1,19 @@
-import {User, Call, UserStatusMessage, WebSocketMessage, WSMessage, CallAcceptedPayload, CallRejectedPayload, CallEndedPayload} from "@/app/types/index"
+import {User, Call, UserStatusMessage, WebSocketMessage, WSMessage, CallAcceptedPayload, CallRejectedPayload, CallLeavePayload, CallEndedPayload, ICECandidatePayload, WSMessageType} from "@/types/index"
+import { webRTCService } from "./webrtcService";
 import { use } from "react";
 class WebSocketClient{
     private ws: WebSocket;
     private wsUrl = ''
-    private statusListeners: ((status: UserStatusMessage) => void)[] = []
-    private presenceListeners: ((status: UserStatusMessage) => void)[] = []
-    private userListListeners: ((users: UserStatusMessage[]) => void)[] = []
-    private incomingCallListeners: ((call: Call) => void)[] = []
-    private callAcceptedListeners: ((callAccepted: CallAcceptedPayload) => void)[] = []
-    private callRejectedListeners: ((callRejected: CallRejectedPayload) => void)[] = []
-    private callEndedListeners: ((callEnded: CallEndedPayload) => void)[] = []
-    private usersStatus: Map<number, "online" | "offline" | "busy"> = new Map() 
-    private call: Call | null = null;
+    private statusListeners:        ((status: UserStatusMessage) => void)[] = []
+    private presenceListeners:      ((status: UserStatusMessage) => void)[] = []
+    private userListListeners:      ((users: UserStatusMessage[]) => void)[] = []
+    private incomingCallListeners:  ((call: Call) => void)[] = []
+    private callAcceptedListeners:  ((callAccepted: CallAcceptedPayload) => void)[] = []
+    private callRejectedListeners:  ((callRejected: CallRejectedPayload) => void)[] = []
+    private callLeaveListeners:     ((callLeave: CallLeavePayload) => void)[] = []
+    private callEndedListeners:     ((callEnded: CallEndedPayload) => void)[] = []
+    private usersStatus:            Map<number, "online" | "offline" | "busy"> = new Map() 
+    private call:                   Call | null = null;
     constructor(){
         this.ws = new WebSocket(this.wsUrl)
     }
@@ -23,7 +25,7 @@ class WebSocketClient{
         })
     }
 
-    sendMessage(type: string, payload: any) {
+    sendMessage(type: WSMessageType, payload: any) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             const message: WebSocketMessage = {
                 type,
@@ -44,8 +46,18 @@ class WebSocketClient{
                 this.handleIncomingCall(message);
             case "call_accepted":
                 this.handleCallAccepted(message);
+            case "call_rejected":
+                this.handleCallRejected(message);
             case "call_ended":
                 this.handleCallEnded(message);
+            case "call_leave":
+                this.handleCallLeave(message);
+            case "add_callee":
+                this.handleAddCallee(message);
+            case "ice-candidate":
+                this.handleICECandidate(message);
+            case "answer":
+                this.handleAnswer;
             default:
 
         }
@@ -93,13 +105,28 @@ class WebSocketClient{
         console.log("User " + callRejected.userId + " has rejected our call")
     }
 
-    handleCallEnded(message: WebSocketMessage) {
-        const callEnded = message.payload as CallEndedPayload
-        this.call = null
-        this.callEndedListeners.forEach(listener => listener(callEnded))
-        console.log("User " + callEnded.userId + "has ended call");
+    handleCallLeave(message: WebSocketMessage) {
+        const payload = message.payload as CallLeavePayload
+        this.callLeaveListeners.forEach(listener => listener(payload))
+        console.log("User " + payload.userId + " has left call.");
     }
 
+    handleCallEnded(message: WebSocketMessage) {
+        const payload = message.payload as CallEndedPayload
+        this.call = null
+        this.callEndedListeners.forEach(listener => listener(payload))
+        console.log("Call " + payload.callId + "has ended.")
+    }
+
+    handleAnswer(message: WebSocketMessage) {
+        const answer = message.payload as RTCSessionDescriptionInit
+        webRTCService.startSession(answer)
+    }
+    
+    handleICECandidate(message: WebSocketMessage) {
+        const payload = message.payload as ICECandidatePayload
+        webRTCService.addIceCandidate(payload.candidate);
+    }
     addStatusListener(listener: (status: UserStatusMessage) => void) {
         this.statusListeners.push(listener);
     }

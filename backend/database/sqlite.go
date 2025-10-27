@@ -22,5 +22,6 @@ func InitSqliteDB() {
 	Db.AutoMigrate(&models.User{})
 	Db.AutoMigrate(&models.Call{})
 	Db.AutoMigrate(&models.UserContact{})
+	Db.AutoMigrate(&models.History{})
 
 }

@@ -1,4 +1,4 @@
-import { User, Call } from '@/app/types/index';
+import { User, Call } from '@/types/index';
 
 
 class ApiService {

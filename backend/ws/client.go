@@ -15,7 +15,6 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-
 type Client struct {
 	Hub             *Hub
 	Conn            *websocket.Conn
@@ -24,19 +23,17 @@ type Client struct {
 	Username        string
 	SessionID       string
 	IsAuthenticated bool
-	PeerConn 		*webrtc.PeerConnection
-	Tracks			[]chan *webrtc.TrackLocalStaticRTP
+	PeerConn        *webrtc.PeerConnection
 }
-
 
 func (c *Client) WritePump() {
 	defer func() {
 		c.Conn.Close()
 	}()
-	
+
 	for {
 		select {
-		case message, ok := <- c.Send:
+		case message, ok := <-c.Send:
 			if !ok {
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
@@ -73,7 +70,7 @@ func (c *Client) ReadPump() {
 	}
 }
 
-func (c *Client) ProcessOffer(off string, callerId uint) {
+func (c *Client) ProcessOffer(publisherID uint, off string, callId uint) {
 	pcConfig := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -113,9 +110,9 @@ func (c *Client) ProcessOffer(off string, callerId uint) {
 		}
 		candidate := ic.ToJSON()
 		msg := models.WebSocketMessage{
-			Type: "ice-candidate",
+			Type:    "ice-candidate",
 			Payload: candidate,
-			Time: time.Now(),
+			Time:    time.Now(),
 		}
 		select {
 		case c.Send <- msg:
@@ -123,36 +120,37 @@ func (c *Client) ProcessOffer(off string, callerId uint) {
 			log.Printf("Send channel full, dropping ICE candidate")
 		}
 	})
-	defer func() {
-		if cErr := peerConnection.Close(); cErr != nil {
-			log.Printf("cannot close peerConnection: %v\n", cErr)
-		}
-	}()
 
 	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
 		panic(err)
 	}
 
-	localTrackChan := make(chan *webrtc.TrackLocalStaticRTP)
-	caller := c.Hub.UserClients[callerId]
-	caller.Tracks = append(caller.Tracks, localTrackChan)
+	session := c.Hub.CallSessions[callId]
 
+	rTrack := ""
 	peerConnection.OnTrack(func(remoteTrack *webrtc.TrackRemote, reciever *webrtc.RTPReceiver) {
 		localTrack, newTrackErr := webrtc.NewTrackLocalStaticRTP(remoteTrack.Codec().RTPCodecCapability, "video", "pion")
 		if newTrackErr != nil {
 			panic(newTrackErr)
 		}
-		localTrackChan <- localTrack
 
+		// publish the local track to Hub (key by remoteTrack.ID())
+		session.PublishTrack(publisherID, remoteTrack.ID(), localTrack, true)
+		rTrack = remoteTrack.ID()
 		rtpBuf := make([]byte, 1400)
 		for {
 			i, _, readErr := remoteTrack.Read(rtpBuf)
 			if readErr != nil {
-				panic(readErr)
+				// stop forwarding on read error
+				if !errors.Is(readErr, io.EOF) {
+					log.Printf("remoteTrack read error: %v", readErr)
+				}
+				return
 			}
 
 			if _, err = localTrack.Write(rtpBuf[:i]); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-				panic(err)
+				log.Printf("localTrack write error: %v", err)
+				return
 			}
 		}
 	})
@@ -161,6 +159,8 @@ func (c *Client) ProcessOffer(off string, callerId uint) {
 	if err != nil {
 		panic(err)
 	}
+
+	session.AddPublishedTracksToPeer(peerConnection, rTrack)
 
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
@@ -175,24 +175,20 @@ func (c *Client) ProcessOffer(off string, callerId uint) {
 	}
 
 	msg := models.WebSocketMessage{
-		Type: "answer",
+		Type:    "answer",
 		Payload: peerConnection.LocalDescription(),
-		Time: time.Now(),
+		Time:    time.Now(),
 	}
 	<-gatherComplete
 
 	c.Send <- msg
 
+	// keep the peerConnection for call lifecycle
 	c.PeerConn = peerConnection
-	
-	for _, trackChan := range caller.Tracks {
-		localTrack := <-trackChan
-		_, err := peerConnection.AddTrack(localTrack)
-		if err != nil {
-			panic(err)
-		}
-	}
+	session.MapMIDsForParticipant(c)
 
+	// Optionally add already published tracks from this caller to this peer (if needed)
+	//_ = c.Hub.AddPublishedTracksToPeer(peerConnection, callerId)
 }
 
 func decode(in string, obj *webrtc.SessionDescription) {

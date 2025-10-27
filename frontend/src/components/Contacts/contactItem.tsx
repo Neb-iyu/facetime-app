@@ -1,6 +1,6 @@
 import React, {useState, useEffect} from 'react';
-import { User } from '@/app/types/index';
-import { wsClient } from '@/app/api/webSocketClient';
+import { User } from '@/types/index';
+import { wsClient } from '@/api/webSocketClient';
 import  Image from "next/image";
 
 const iconUrl = '';
@@ -32,6 +32,9 @@ function contactItem({contact}: ContactItemProps) {
                     ) : (
                         <img src={iconUrl + "busy.ico"} />
                     )}
+                </div>
+                <div>
+                    
                 </div>
             </div>
         </div>

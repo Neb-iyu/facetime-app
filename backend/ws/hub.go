@@ -7,28 +7,31 @@ import (
 
 	"github.com/Neb-iyu/facetime-app/backend/database"
 	"github.com/Neb-iyu/facetime-app/backend/models"
+	"github.com/pion/webrtc/v4"
 	//"github.com/Neb-iyu/facetime-app/backend/rtc"
 )
 
 type Hub struct {
-	UserClients   map[uint]*Client
-	Broadcast     chan models.WebSocketMessage
-	HandleMessage chan models.WebSocketMessage
-	Register      chan *Client
-	Unregister    chan *Client
-	Mutex         sync.RWMutex
-	UserStatuses  map[uint]*models.UserStatusMessage
-	Calls         map[uint]*models.Call
+	UserClients   	map[uint]*Client
+	Broadcast     	chan models.WebSocketMessage
+	HandleMessage 	chan models.WebSocketMessage
+	Register      	chan *Client
+	Unregister    	chan *Client
+	Mutex         	sync.RWMutex
+	UserStatuses  	map[uint]*models.UserStatusMessage
+
+	// call sessions keyed by call ID
+	CallSessions 	map[uint]*CallSession
 }
 
 func NewHub() *Hub {
 	hub := &Hub{
-		Broadcast:    make(chan models.WebSocketMessage),
-		Register:     make(chan *Client),
-		Unregister:   make(chan *Client),
-		UserClients:  make(map[uint]*Client),
-		UserStatuses: make(map[uint]*models.UserStatusMessage),
-		Calls:        make(map[uint]*models.Call),
+		Broadcast:       make(chan models.WebSocketMessage),
+		Register:        make(chan *Client),
+		Unregister:      make(chan *Client),
+		UserClients:     make(map[uint]*Client),
+		UserStatuses:    make(map[uint]*models.UserStatusMessage),
+		CallSessions:    make(map[uint]*CallSession),
 	}
 	hub.InitializeUserStatuses()
 	return hub
@@ -124,6 +127,20 @@ func (h *Hub) handleUnregister(client *Client) {
 	h.broadcastUserStatus(client.UserID, models.Offline)
 
 	log.Printf("User %s disconnected.", client.Username)
+}
+
+// CreateCallSession creates a CallSession for a persisted call and registers participants.
+func (h *Hub) CreateCallSession(call *models.Call) *CallSession {
+
+	session := NewCallSession(*call)
+	// register participants who are connected
+	for _, uid := range append([]uint{call.CallerId}, call.CalleeIds...) {
+		if cl, ok := h.UserClients[uid]; ok && h.UserStatuses[uid].Status == models.Online {
+			session.Participants[uid] = cl
+		}
+	}
+	h.CallSessions[uint(call.Id)] = session
+	return session
 }
 
 func (h *Hub) updateUserOnlineStatus(userID uint, status models.UserStatus) {
@@ -235,10 +252,12 @@ func (h *Hub) handleMessage(msg models.WebSocketMessage) {
 		h.handleCallAccepted(msg)
 	case "call_rejected":
 		h.handleCallRejected(msg)
-	case "call_ended":
-		h.handleCallEnded(msg)
-	case "ice":
-
+	case "call_leave":
+		h.handleCallLeave(msg)
+	case "add_callee":
+		h.handleAddCallee(msg)
+	case "ice-candidate":
+		h.handleICECandidate(msg)
 	default:
 		h.broadcastMessage(msg)
 	}
@@ -246,30 +265,46 @@ func (h *Hub) handleMessage(msg models.WebSocketMessage) {
 }
 
 func (h *Hub) handleIncomingCall(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+
 	db := database.Db
 	call, ok := msg.Payload.(models.Call)
 	if !ok {
 		log.Printf("Failed to assert msg.Payload as models.Call")
 		return
 	}
+	caller := h.UserClients[call.CallerId]
+	db.Create(&call)
+	h.CreateCallSession(&call)
 	//if h.UserStatuses[call.CalleeId].Status != models.Online {
 	//TODO: handle busy and offline
 
 	for _, id := range call.CalleeIds {
-		h.UserClients[uint(id)].Send <- msg
+		if h.UserStatuses[id].Status != models.Online {
+			log.Printf("User %d is already in a call", id)
+			continue
+		}
+		select {
+		case h.UserClients[uint(id)].Send <- msg:
+		default:
+
+		}
 	}
 	if call.Offer == nil {
 		log.Printf("Caller does not have any offer")
 		return
 	}
-	caller := h.UserClients[call.CallerId]
-	caller.ProcessOffer(*call.Offer, caller.UserID)
-	db.Create(&call)
-	h.Calls[uint(call.Id)] = &call
+	caller.ProcessOffer(call.CallerId, *call.Offer, call.Id)
+	h.updateUserOnlineStatus(call.CallerId, models.Busy)
+	h.broadcastUserStatus(call.CallerId, models.Busy)
 
 }
 
 func (h *Hub) handleCallAccepted(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+
 	type CallAcceptedPayload struct {
 		CallId uint   `json:"callId"`
 		UserId uint   `json:"userId"`
@@ -281,15 +316,20 @@ func (h *Hub) handleCallAccepted(msg models.WebSocketMessage) {
 		log.Printf("Failed to assert msg.Payload as CallAcceptedPayload")
 		return
 	}
-	if _, ok := h.Calls[payload.CallId]; !ok {
+	if !ok {
 		log.Printf("No call in stack")
 		return
 	}
-	h.UserClients[payload.UserId].ProcessOffer(payload.Offer, h.Calls[payload.CallId].CallerId)
+	h.UserClients[payload.UserId].ProcessOffer(payload.UserId, payload.Offer, payload.CallId)
 
+	h.updateUserOnlineStatus(payload.UserId, models.Busy)
+	h.broadcastUserStatus(payload.UserId, models.Busy)
 }
 
 func (h *Hub) handleCallRejected(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+
 	type CallRejectedPayload struct {
 		CallId uint `json:"callId"`
 		UserId uint `json:"userId"`
@@ -299,79 +339,141 @@ func (h *Hub) handleCallRejected(msg models.WebSocketMessage) {
 		log.Printf("Failed to assert msg.Payload as CallRejectedPayload")
 		return
 	}
-	call, ok := h.Calls[payload.CallId]
 	if !ok {
 		log.Printf("No call in stack")
 		return
 	}
-	// Remove payload.UserId from call.CalleeId slice
-	newCalleeIds := make([]uint, 0, len(call.CalleeIds))
-	for _, id := range call.CalleeIds {
-		if id != payload.UserId {
-			newCalleeIds = append(newCalleeIds, id)
-		}
+	session := h.CallSessions[payload.CallId]
+	db := database.Db
+	history := models.History{
+		Id: 0,
+		UserId: payload.UserId,
+		CallId: session.ID,
+		Status: models.Missed,
+		Role:	"callee",
+		EndTime: time.Now(),
 	}
-	call.CalleeIds = newCalleeIds
-	caller := h.UserClients[call.CallerId]
-	if len(call.CalleeIds) == 0 {
-		if caller.PeerConn != nil {
-			caller.PeerConn.Close()
-		}
-		delete(h.Calls, call.Id)
+	db.Create(&history)
+	session.RemoveParticipant(payload.UserId, nil)
+
+	if len(session.Participants) == 1 {
+		session.Call.Status = models.Missed
+		t := time.Now()
+		session.Call.EndTime = &t
+		db.Save(session.Call)
+		session.Close()
 	}
+
+	caller := session.Participants[session.Call.CallerId]
 	caller.Send <- msg
 
 }
 
-func (h *Hub) handleCallEnded(msg models.WebSocketMessage) {
-	type CallEndedPayload struct {
+func (h *Hub) handleCallLeave(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+	db := database.Db
+	type CallLeavePayload struct {
 		CallId uint `json:"callId"`
 		UserId uint `json:"userId"`
 	}
-	payload, ok := msg.Payload.(CallEndedPayload)
+	payload, ok := msg.Payload.(CallLeavePayload)
 	if !ok {
-		log.Printf("Couldnt assert msg.Payload as CallEndedPayload")
+		log.Printf("Couldn't assert msg.Payload as CallEndedPayload")
 	}
-	call := h.Calls[payload.CallId]
-	caller := h.UserClients[call.CallerId]
-	if payload.UserId == call.CallerId {
-		if caller.PeerConn != nil {
-			caller.PeerConn.Close()
-		}
-		for _, id := range call.CalleeIds {
-			h.UserClients[id].Send <- msg
-		}
-		//Check to see if there is only one user connected
-		if len(call.CalleeIds) == 1 {
-			h.UserClients[call.CalleeIds[0]].PeerConn.Close()
-			delete(h.Calls, call.Id)
-		}
-	} else {
-		if h.UserClients[payload.UserId].PeerConn != nil {
-			h.UserClients[payload.UserId].PeerConn.Close()
-		}
-		newCalleeIds := make([]uint, 0, len(call.CalleeIds))
-		for _, id := range call.CalleeIds {
-			if id != payload.UserId {
-				h.UserClients[id].Send <- msg
-				newCalleeIds = append(newCalleeIds, id)
+	session := h.CallSessions[payload.CallId]
+
+	role := "callee"
+	if session.Call.CallerId == payload.UserId {
+		role = "caller"
+	}
+
+	history := models.History{
+		Id:     0,
+		UserId:  payload.UserId,
+		CallId:  session.ID,
+		Status:  models.Ended,
+		Role:    role,
+		EndTime: time.Now(),
+	}
+	db.Create(&history)
+
+	session.RemoveParticipant(payload.UserId, &msg)
+	if len(session.Participants) == 1 {
+		session.Close()
+		t := time.Now()
+		session.Call.EndTime = &t
+		db.Save(&session.Call)
+	}
+	h.updateUserOnlineStatus(payload.UserId, models.Online)
+	h.broadcastUserStatus(payload.UserId, models.Online)
+}
+
+func (h *Hub) handleAddCallee(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+	
+	type AddCalleePayload struct {
+		CallId uint `json:"callId"`
+		UserId uint `json:"userId"`
+	}
+	payload, ok := msg.Payload.(AddCalleePayload)
+	if !ok {
+		log.Printf("Couldn't assert msg.Payload as AddCalleePayload")
+		return
+	}
+	session, exists := h.CallSessions[payload.CallId]
+	if !exists {
+		log.Printf("Call session %d does not exist", payload.CallId)
+		return
+	}
+	client, exists := h.UserClients[payload.UserId]; 
+	if !exists {
+		log.Printf("User %d not found in client struct", payload.UserId)
+		return
+	}
+	session.AddParticipant(client)
+	msg = models.WebSocketMessage{
+		Type: "incoming_call",
+		Payload: session.Call,
+		Time: time.Now(),
+	}
+	select {
+	case client.Send <- msg:
+	default:
+
+	}
+}
+
+func (h *Hub) handleICECandidate(msg models.WebSocketMessage) {
+	h.Mutex.RLock()
+	defer h.Mutex.RUnlock()
+
+	type ICECandidatePayload struct {
+		UserId    uint                    `json:"userId"`
+		Candidate webrtc.ICECandidateInit `json:"candidate"`
+		CallId	  uint 					  `json:"callId"`
+	}
+	payload, ok := msg.Payload.(ICECandidatePayload)
+	if !ok {
+		log.Printf("Couldn't assert msg.Payload as ICECandidatePayload")
+		return
+	}
+	if payload.CallId != 0 {
+		if session, exists := h.CallSessions[payload.CallId]; exists {
+			if client, exists := session.Participants[payload.UserId]; exists {
+				if client.PeerConn != nil {
+					if err := client.PeerConn.AddICECandidate(payload.Candidate); err != nil {
+						log.Printf("Failed to add ICE candidate: %v", err)
+					}
+				}
+			} else {
+				log.Printf("User %d not part of call %d.", payload.UserId, payload.CallId)
 			}
-		}
-		caller.Send <- msg
-		//Check to see if there is only one callee with the caller not connected
-		if caller.PeerConn == nil && len(call.CalleeIds) == 1 {
-			if h.UserClients[call.CalleeIds[0]].PeerConn != nil {
-				h.UserClients[call.CalleeIds[0]].PeerConn.Close()
-			}
-			delete(h.Calls, call.Id)
-		} else if len(call.CalleeIds) == 0 {
-			if caller.PeerConn != nil {
-				caller.PeerConn.Close()
-			}
-			delete(h.Calls, call.Id)
 		}
 	}
 }
+
 func (h *Hub) IsUserOnline(userID uint) bool {
 	h.Mutex.RLock()
 	defer h.Mutex.RUnlock()

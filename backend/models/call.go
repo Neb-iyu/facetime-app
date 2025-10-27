@@ -13,8 +13,8 @@ const (
 
 type Call struct {
 	Id		  uint			`gorm:"primaryKey"`
-	CallerId  uint
-	CalleeIds []uint
+	CallerId  uint			`gorm:"foreignKey:CallerId"`
+	CalleeIds []uint		`gorm:"-"`
 	StartTime time.Time
 	EndTime   *time.Time
 	Status 	  CallStatus
