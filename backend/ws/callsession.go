@@ -224,14 +224,12 @@ func (s *CallSession) RenegotiateParticipant(p *Client) error {
     }
 
     ld := p.PeerConn.LocalDescription()
-    b, _ := json.Marshal(ld)
-    encoded := base64.StdEncoding.EncodeToString(b)
+    // b, _ := json.Marshal(ld)
+    // encoded := base64.StdEncoding.EncodeToString(b)
 
     msg := models.WebSocketMessage{
         Type: "offer",
-        Payload: map[string]interface{}{
-            "sdp": encoded,
-        },
+        Payload: ld,
         Time: time.Now(),
     }
 

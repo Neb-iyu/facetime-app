@@ -22,6 +22,7 @@ func GetHistory(c *gin.Context) {
 
 	if result := db.First(&history, id); result.Error != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "History not found"})
+		return
 	}
 
 	c.JSON(http.StatusOK, history)
@@ -41,47 +42,67 @@ func AddHistory(c *gin.Context) {
 	c.JSON(http.StatusCreated, history)
 }
 
+// GetUserHistory: if :id == "me" return current user's history, otherwise return requested user's history (admin)
 func GetUserHistory(c *gin.Context) {
-	userId, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		log.Printf("Failed to bind id JSON: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	idParam := c.Param("id")
+	var targetUserId uint64
+	if idParam == "me" {
+		ai, ok := c.Get("authUser")
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
+			return
+		}
+		authUser := ai.(models.User)
+		targetUserId = uint64(authUser.Id)
+	} else {
+		uid, err := strconv.ParseUint(idParam, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		targetUserId = uid
 	}
+
 	db := database.Db
 	var history []models.Call
-	
+
 	rows, err := db.Raw(
-		"SELECT c.id, c.callerId, c.StartTime, h.EndTime FROM calls c JOIN history h on h.callid = c.id WHERE h.userid = ?",
-		userId,
+		"SELECT c.id, c.caller_id, c.start_time, h.end_time FROM calls c JOIN history h on h.call_id = c.id WHERE h.user_id = ?",
+		targetUserId,
 	).Rows()
+	if err != nil {
+		log.Printf("history query error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query history"})
+		return
+	}
 	defer rows.Close()
+
 	for rows.Next() {
 		var id uint
 		var callerId uint
 		var startTime time.Time
 		var endTime *time.Time
-		if err := rows.Scan(&id, &callerId, &startTime, endTime); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			log.Printf("Failed to find user %v's history: %v", userId, err.Error())
-			return
+		if err := rows.Scan(&id, &callerId, &startTime, &endTime); err != nil {
+			log.Printf("row scan error: %v", err)
+			continue
 		}
 		call := models.Call{
-			Id: id,
-			CallerId: callerId,
+			Id:        id,
+			CallerId:  callerId,
 			StartTime: startTime,
-			EndTime: endTime,
+			EndTime:   endTime,
 		}
-		var h []models.History
-		if err := db.Where("callid = ?", id).Find(&h).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			log.Printf("Failed to find call %v's history: %v", call.Id, err.Error())
-		}
-		for _, c := range(h) {
-			if c.Role == "callee" {
-				call.CalleeIds = append(call.CalleeIds, c.UserId)
+		// fill callee ids from history table if needed
+		var hs []models.History
+		if err := db.Where("call_id = ?", id).Find(&hs).Error; err == nil {
+			for _, hh := range hs {
+				if hh.Role == "callee" {
+					call.CalleeIds = append(call.CalleeIds, hh.UserId)
+				}
 			}
 		}
 		history = append(history, call)
 	}
+
+	c.JSON(http.StatusOK, history)
 }

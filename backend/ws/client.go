@@ -70,7 +70,7 @@ func (c *Client) ReadPump() {
 	}
 }
 
-func (c *Client) ProcessOffer(publisherID uint, off string, callId uint) {
+func (c *Client) ProcessOffer(off json.RawMessage, callId uint) {
 	pcConfig := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -135,7 +135,7 @@ func (c *Client) ProcessOffer(publisherID uint, off string, callId uint) {
 		}
 
 		// publish the local track to Hub (key by remoteTrack.ID())
-		session.PublishTrack(publisherID, remoteTrack.ID(), localTrack, true)
+		session.PublishTrack(c.UserID, remoteTrack.ID(), localTrack, true)
 		rTrack = remoteTrack.ID()
 		rtpBuf := make([]byte, 1400)
 		for {
@@ -191,13 +191,22 @@ func (c *Client) ProcessOffer(publisherID uint, off string, callId uint) {
 	//_ = c.Hub.AddPublishedTracksToPeer(peerConnection, callerId)
 }
 
-func decode(in string, obj *webrtc.SessionDescription) {
-	b, err := base64.StdEncoding.DecodeString(in)
+func decode(in json.RawMessage, obj *webrtc.SessionDescription) {
+	// try direct JSON first (expected)
+	if err := json.Unmarshal(in, obj); err == nil {
+		return
+	}
+
+	// fallback: maybe it's a quoted base64 string -> decode to string then base64-decode
+	var s string
+	if err := json.Unmarshal(in, &s); err != nil {
+		panic(err)
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
 		panic(err)
 	}
-
-	if err = json.Unmarshal(b, obj); err != nil {
+	if err := json.Unmarshal(b, obj); err != nil {
 		panic(err)
 	}
 }

@@ -2,6 +2,7 @@ export interface User {
     id:         number;
     name:       string;
     email:      string;
+    password:   string;
     status:     'online' | 'offline' | 'busy';
     avatarUrl?: string;
     lastSeen:   Date;
@@ -17,7 +18,18 @@ export interface Call {
     offer?:     RTCSessionDescriptionInit;
     answer?:    RTCSessionDescriptionInit;
 }
-export type WSMessageType = "user_online" | "user_offline" | "status" | "incoming_call" | "call_accepted" | "call_rejected" | "call_ended" | "call_leave" | "add_callee" | "ice-candidate" | "answer";
+export interface CallParticipant {
+    userId: number;
+    name?:   string;
+    trackId?: string;
+    mid?:     string | null;
+    stream?:  MediaStream | null;
+    audioMuted: boolean;
+    videoMuted: boolean;
+    isSpeaking: boolean;
+}
+
+export type WSMessageType = "user_online" | "user_offline" | "status" | "incoming_call" | "call_accepted" | "call_rejected" | "call_ended" | "user_leave" | "add_callee" | "ice-candidate" | "answer" | "call_offer" | "reconnect" | "mid-map";
 export type WSMessage = 
     | {type: 'offer', callId: string, offer: RTCSessionDescriptionInit}
     | {type: 'answer', callId: string, answer: RTCSessionDescriptionInit}
@@ -42,7 +54,7 @@ export interface CallRejectedPayload {
     callId: number
     userId: number
 }
-export interface CallLeavePayload {
+export interface UserLeftPayload {
     callId: number
     userId: number
 }
@@ -56,6 +68,12 @@ export interface ICECandidatePayload {
 export interface AddCalleePayload {
     callId: number
     userId: number
+}
+export interface TrackUpdatePayload {
+    callId: number,
+    userId: number,
+    trackType: string,
+    muted: boolean
 }
 export interface WebSocketMessage {
     type:    WSMessageType

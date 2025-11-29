@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -12,26 +13,28 @@ import (
 )
 
 type Hub struct {
-	UserClients   	map[uint]*Client
-	Broadcast     	chan models.WebSocketMessage
-	HandleMessage 	chan models.WebSocketMessage
-	Register      	chan *Client
-	Unregister    	chan *Client
-	Mutex         	sync.RWMutex
-	UserStatuses  	map[uint]*models.UserStatusMessage
+	UserClients   map[uint]*Client
+	Broadcast     chan models.WebSocketMessage
+	HandleMessage chan models.WebSocketMessage
+	Register      chan *Client
+	Unregister    chan *Client
+	Mutex         sync.RWMutex
+	UserStatuses  map[uint]*models.UserStatusMessage
 
 	// call sessions keyed by call ID
-	CallSessions 	map[uint]*CallSession
+	CallSessions        map[uint]*CallSession
+	DisconnectedClients map[uint]*Client // userID -> client (recently disconnected)
 }
 
 func NewHub() *Hub {
 	hub := &Hub{
-		Broadcast:       make(chan models.WebSocketMessage),
-		Register:        make(chan *Client),
-		Unregister:      make(chan *Client),
-		UserClients:     make(map[uint]*Client),
-		UserStatuses:    make(map[uint]*models.UserStatusMessage),
-		CallSessions:    make(map[uint]*CallSession),
+		Broadcast:           make(chan models.WebSocketMessage),
+		Register:            make(chan *Client),
+		Unregister:          make(chan *Client),
+		UserClients:         make(map[uint]*Client),
+		UserStatuses:        make(map[uint]*models.UserStatusMessage),
+		CallSessions:        make(map[uint]*CallSession),
+		DisconnectedClients: make(map[uint]*Client),
 	}
 	hub.InitializeUserStatuses()
 	return hub
@@ -125,6 +128,42 @@ func (h *Hub) handleUnregister(client *Client) {
 
 	h.updateUserOnlineStatus(client.UserID, models.Offline)
 	h.broadcastUserStatus(client.UserID, models.Offline)
+	h.DisconnectedClients[client.UserID] = client
+
+	// schedule cleanup after grace period
+	grace := 30 * time.Second
+	go func(uid uint, c *Client) {
+		time.Sleep(grace)
+		h.Mutex.Lock()
+		defer h.Mutex.Unlock()
+		if _, still := h.DisconnectedClients[uid]; still {
+			for _, sess := range h.CallSessions {
+				sess.Mu.Lock()
+				if _, present := sess.Participants[uid]; present {
+					type Payload struct {
+						CallId uint `json:"callId"`
+						UserId uint `json:"userId"`
+					}
+					msg := models.WebSocketMessage{
+						Type: "user_leave",
+						Payload: Payload{
+							CallId: sess.ID,
+							UserId: uid,
+						},
+						Time: time.Now(),
+					}
+					sess.RemoveParticipant(uid, &msg)
+				}
+				sess.Mu.Unlock()
+			}
+			delete(h.DisconnectedClients, uid)
+			if c.Send != nil {
+				close(c.Send)
+			}
+			// logs
+			log.Printf("Cleaned up disconnected client %d after grace period", uid)
+		}
+	}(client.UserID, client)
 
 	log.Printf("User %s disconnected.", client.Username)
 }
@@ -214,6 +253,7 @@ func (h *Hub) CheckUserStatus(userID uint) *models.UserStatusMessage {
 	status := h.UserStatuses[userID]
 	return status
 }
+
 func (h *Hub) sendOnlineUsersToClient(client *Client) {
 	onlineUsers := h.GetOnlineUsers()
 	message := models.WebSocketMessage{
@@ -252,12 +292,18 @@ func (h *Hub) handleMessage(msg models.WebSocketMessage) {
 		h.handleCallAccepted(msg)
 	case "call_rejected":
 		h.handleCallRejected(msg)
-	case "call_leave":
-		h.handleCallLeave(msg)
+	case "user_leave":
+		h.handleUserLeft(msg)
 	case "add_callee":
 		h.handleAddCallee(msg)
 	case "ice-candidate":
 		h.handleICECandidate(msg)
+	case "call_offer":
+		h.handleOffer(msg)
+	case "track_update":
+		h.handleTrackUpdate(msg)
+	case "reconnect":
+		h.handleReconnect(msg)
 	default:
 		h.broadcastMessage(msg)
 	}
@@ -267,19 +313,32 @@ func (h *Hub) handleMessage(msg models.WebSocketMessage) {
 func (h *Hub) handleIncomingCall(msg models.WebSocketMessage) {
 	h.Mutex.Lock()
 	defer h.Mutex.Unlock()
+	type IncomingCallPayload struct {
+		CallId uint `json:"userId"`
+		UserId uint `json:"callId"`
+	}
 
-	db := database.Db
-	call, ok := msg.Payload.(models.Call)
+	payload, ok := msg.Payload.(IncomingCallPayload)
 	if !ok {
 		log.Printf("Failed to assert msg.Payload as models.Call")
 		return
 	}
+	session, exists := h.CallSessions[payload.CallId]
+	if !exists {
+		log.Printf("Call %d doesn't exist", payload.CallId)
+		return
+	}
+	call := session.Call
 	caller := h.UserClients[call.CallerId]
-	db.Create(&call)
-	h.CreateCallSession(&call)
+	// db.Create(&call)
+	// h.CreateCallSession(&call)
 	//if h.UserStatuses[call.CalleeId].Status != models.Online {
 	//TODO: handle busy and offline
-
+	msg = models.WebSocketMessage{
+		Type:    "incoming_call",
+		Payload: call,
+		Time:    time.Now(),
+	}
 	for _, id := range call.CalleeIds {
 		if h.UserStatuses[id].Status != models.Online {
 			log.Printf("User %d is already in a call", id)
@@ -288,17 +347,45 @@ func (h *Hub) handleIncomingCall(msg models.WebSocketMessage) {
 		select {
 		case h.UserClients[uint(id)].Send <- msg:
 		default:
-
+			log.Printf("Couldn't send user %v the incoming call due to full channel or stg I don't no", id)
 		}
 	}
 	if call.Offer == nil {
 		log.Printf("Caller does not have any offer")
 		return
 	}
-	caller.ProcessOffer(call.CallerId, *call.Offer, call.Id)
+	caller.ProcessOffer(call.Offer, call.Id)
 	h.updateUserOnlineStatus(call.CallerId, models.Busy)
 	h.broadcastUserStatus(call.CallerId, models.Busy)
 
+}
+
+func (h *Hub) handleOffer(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+
+	type OfferPayload struct {
+		CallId uint            `json:"callId"`
+		UserId uint            `json:"userId"`
+		Offer  json.RawMessage `json:"offer"`
+	}
+
+	payload, ok := msg.Payload.(OfferPayload)
+	if !ok {
+		log.Printf("handleOffer: Could not assert msg.Payload as OfferPayload")
+		return
+	}
+	if _, exists := h.CallSessions[payload.CallId]; !exists {
+		log.Printf("handleOffer: Call %d session does not exist", payload.CallId)
+	}
+	cl, exists := h.UserClients[payload.UserId]
+	if !exists {
+		log.Printf("handleOffer: User %d is not found", payload.UserId)
+		return
+	}
+	cl.ProcessOffer(payload.Offer, payload.CallId)
+	h.updateUserOnlineStatus(payload.UserId, models.Busy)
+	h.broadcastUserStatus(payload.UserId, models.Busy)
 }
 
 func (h *Hub) handleCallAccepted(msg models.WebSocketMessage) {
@@ -306,9 +393,9 @@ func (h *Hub) handleCallAccepted(msg models.WebSocketMessage) {
 	defer h.Mutex.Unlock()
 
 	type CallAcceptedPayload struct {
-		CallId uint   `json:"callId"`
-		UserId uint   `json:"userId"`
-		Offer  string `json:"offer"`
+		CallId uint            `json:"callId"`
+		UserId uint            `json:"userId"`
+		Offer  json.RawMessage `json:"offer"`
 	}
 
 	payload, ok := msg.Payload.(CallAcceptedPayload)
@@ -320,7 +407,7 @@ func (h *Hub) handleCallAccepted(msg models.WebSocketMessage) {
 		log.Printf("No call in stack")
 		return
 	}
-	h.UserClients[payload.UserId].ProcessOffer(payload.UserId, payload.Offer, payload.CallId)
+	h.UserClients[payload.UserId].ProcessOffer(payload.Offer, payload.CallId)
 
 	h.updateUserOnlineStatus(payload.UserId, models.Busy)
 	h.broadcastUserStatus(payload.UserId, models.Busy)
@@ -346,11 +433,11 @@ func (h *Hub) handleCallRejected(msg models.WebSocketMessage) {
 	session := h.CallSessions[payload.CallId]
 	db := database.Db
 	history := models.History{
-		Id: 0,
-		UserId: payload.UserId,
-		CallId: session.ID,
-		Status: models.Missed,
-		Role:	"callee",
+		Id:      0,
+		UserId:  payload.UserId,
+		CallId:  session.ID,
+		Status:  models.Missed,
+		Role:    "callee",
 		EndTime: time.Now(),
 	}
 	db.Create(&history)
@@ -369,15 +456,15 @@ func (h *Hub) handleCallRejected(msg models.WebSocketMessage) {
 
 }
 
-func (h *Hub) handleCallLeave(msg models.WebSocketMessage) {
+func (h *Hub) handleUserLeft(msg models.WebSocketMessage) {
 	h.Mutex.Lock()
 	defer h.Mutex.Unlock()
 	db := database.Db
-	type CallLeavePayload struct {
+	type UserLeftPayload struct {
 		CallId uint `json:"callId"`
 		UserId uint `json:"userId"`
 	}
-	payload, ok := msg.Payload.(CallLeavePayload)
+	payload, ok := msg.Payload.(UserLeftPayload)
 	if !ok {
 		log.Printf("Couldn't assert msg.Payload as CallEndedPayload")
 	}
@@ -389,7 +476,7 @@ func (h *Hub) handleCallLeave(msg models.WebSocketMessage) {
 	}
 
 	history := models.History{
-		Id:     0,
+		Id:      0,
 		UserId:  payload.UserId,
 		CallId:  session.ID,
 		Status:  models.Ended,
@@ -412,7 +499,7 @@ func (h *Hub) handleCallLeave(msg models.WebSocketMessage) {
 func (h *Hub) handleAddCallee(msg models.WebSocketMessage) {
 	h.Mutex.Lock()
 	defer h.Mutex.Unlock()
-	
+
 	type AddCalleePayload struct {
 		CallId uint `json:"callId"`
 		UserId uint `json:"userId"`
@@ -427,16 +514,16 @@ func (h *Hub) handleAddCallee(msg models.WebSocketMessage) {
 		log.Printf("Call session %d does not exist", payload.CallId)
 		return
 	}
-	client, exists := h.UserClients[payload.UserId]; 
+	client, exists := h.UserClients[payload.UserId]
 	if !exists {
 		log.Printf("User %d not found in client struct", payload.UserId)
 		return
 	}
 	session.AddParticipant(client)
 	msg = models.WebSocketMessage{
-		Type: "incoming_call",
+		Type:    "incoming_call",
 		Payload: session.Call,
-		Time: time.Now(),
+		Time:    time.Now(),
 	}
 	select {
 	case client.Send <- msg:
@@ -452,7 +539,7 @@ func (h *Hub) handleICECandidate(msg models.WebSocketMessage) {
 	type ICECandidatePayload struct {
 		UserId    uint                    `json:"userId"`
 		Candidate webrtc.ICECandidateInit `json:"candidate"`
-		CallId	  uint 					  `json:"callId"`
+		CallId    uint                    `json:"callId"`
 	}
 	payload, ok := msg.Payload.(ICECandidatePayload)
 	if !ok {
@@ -474,6 +561,74 @@ func (h *Hub) handleICECandidate(msg models.WebSocketMessage) {
 	}
 }
 
+func (h *Hub) handleTrackUpdate(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+	type TrackUpdatePayload struct {
+		CallId uint `json:"callId"`
+		UserId uint `json:"userId"`
+		TrackType string `json:"trackType"`
+		Muted bool `json:"muted"` 
+	}
+	payload, ok := msg.Payload.(TrackUpdatePayload)
+	if !ok {
+		log.Printf("Could not assert msg payload as TrackUpdatePayload")
+		return
+	}
+	session := h.CallSessions[payload.CallId]
+	for _, c := range session.Participants {
+		if c.UserID == payload.UserId {
+			continue
+		}
+		select {
+		case c.Send <- msg:
+		default:
+
+		}
+	}
+}
+
+func (h *Hub) handleReconnect(msg models.WebSocketMessage) {
+	h.Mutex.Lock()
+	defer h.Mutex.Unlock()
+	type ReconnectPayload struct {
+		CallId  uint `json:"callId"`
+		UserId  uint `json:"userId"`
+		PcAlive bool `json:"pcAlive"`
+	}
+	payload, ok := msg.Payload.(ReconnectPayload)
+	if !ok {
+		log.Printf("Could not assert message payload as ReconnectPayload")
+		return
+	}
+	client, exists := h.UserClients[payload.UserId]
+	if !exists {
+		if c, ok := h.DisconnectedClients[payload.UserId]; ok {
+			client = c
+			h.UserClients[payload.UserId] = client
+			delete(h.DisconnectedClients, payload.UserId)
+		} else {
+			log.Printf("reconnect: no client object for user %d", payload.UserId)
+			return
+		}
+	} else {
+		delete(h.DisconnectedClients, payload.UserId)
+	}
+
+	session, ok := h.CallSessions[payload.CallId]
+	if !ok {
+		log.Printf("reconnect: no call session: %d", payload.CallId)
+		return
+	}
+	session.AddParticipant(client)
+	if payload.PcAlive {
+		go func() {
+			if err := session.RenegotiateParticipant(client); err != nil {
+				log.Printf("reconnect: renegotiate error for %d: %v", client.UserID, err)
+			}
+		}()
+	}
+}
 func (h *Hub) IsUserOnline(userID uint) bool {
 	h.Mutex.RLock()
 	defer h.Mutex.RUnlock()

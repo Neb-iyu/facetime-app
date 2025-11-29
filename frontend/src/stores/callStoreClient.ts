@@ -1,7 +1,6 @@
 import { useCallStore } from './callStore';
 import type { Call } from '../types';
 
-// simple alias if you ever need the hook directly in components
 export const callStore = useCallStore;
 
 // getters/setters for non-react code
@@ -18,11 +17,11 @@ export function isLoading(): boolean {
 }
 
 // action wrappers (forward to store actions)
-export function makeCall(ids: number[], videoNode: HTMLVideoElement) {
+export function makeCall(ids: number[], videoNode?: HTMLVideoElement | null) {
     return useCallStore.getState().makeCall(ids, videoNode);
 }
 
-export function acceptCall(call: Call, localVideoNode: HTMLVideoElement) {
+export function acceptCall(call: Call, localVideoNode?: HTMLVideoElement | null) {
     return useCallStore.getState().acceptCall(call, localVideoNode);
 }
 
@@ -42,8 +41,8 @@ export function addToCall(id: number) {
     return useCallStore.getState().addToCall(id);
 }
 
-export function addPlayaMiSelf(id: number) {
-    return useCallStore.getState().addPlayaMiSelf(id);
+export function invitePlaya(id: number) {
+    return useCallStore.getState().invitePlaya(id);
 }
 
 // subscribe helper: selector -> listener, returns unsubscribe
